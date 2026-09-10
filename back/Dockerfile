@@ -23,7 +23,7 @@ RUN npm prune --production
 #   - EXPOSE the app port and start the server (node dist/main.js)
 FROM node:20-alpine AS runtime
 WORKDIR /back
-COPY --from=builder package*.json .
+COPY --from=builder /back/package*.json ./
 COPY --from=builder /back/dist ./dist
 COPY --from=builder /back/node_modules ./node_modules
 ENV NODE_ENV=production

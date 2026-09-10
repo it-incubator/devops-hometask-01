@@ -1,0 +1,210 @@
+name: Deploy
+
+on:
+  push:
+    branches: [week4]
+
+permissions:
+  contents: read
+
+# Не допускаем одновременных деплоев на один сервер.
+concurrency:
+  group: deploy-week4
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  checks:
+    uses: ./.github/workflows/typecheck.yaml
+
+  build:
+    needs: checks
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: back
+            needs_api_url: false
+          - service: front
+            needs_api_url: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        env:
+          DOCKER_USER: ${{ secrets.DOCKER_USER }}
+          DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+        run: |
+          printf '%s' "$DOCKER_TOKEN" |
+            docker login --username "$DOCKER_USER" --password-stdin
+
+      - name: Build and push images
+        env:
+          SERVICE: ${{ matrix.service }}
+          NEEDS_API_URL: ${{ matrix.needs_api_url }}
+          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          IMAGE_SHA: ${{ secrets.DOCKER_USER }}/todo-${{ matrix.service }}:sha-${{ github.sha }}
+          IMAGE_LATEST: ${{ secrets.DOCKER_USER }}/todo-${{ matrix.service }}:latest
+        run: |
+          BUILD_ARGS=()
+
+          if [ "$NEEDS_API_URL" = "true" ]; then
+            : "${VITE_API_URL:?Set VITE_API_URL in repository variables}"
+            BUILD_ARGS+=(--build-arg "VITE_API_URL=$VITE_API_URL")
+          fi
+
+          docker build \
+            --platform linux/amd64 \
+            "${BUILD_ARGS[@]}" \
+            -t "$IMAGE_SHA" \
+            -t "$IMAGE_LATEST" \
+            "$SERVICE"
+
+          docker push "$IMAGE_SHA"
+          docker push "$IMAGE_LATEST"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -eu
+
+            cd /var/www/wfr
+
+            grep -q '^APP_VERSION=' .env.development.compose || {
+              echo "APP_VERSION is missing in .env.development.compose"
+              exit 1
+            }
+
+            sed -i "s|^APP_VERSION=.*|APP_VERSION=sha-${{ github.sha }}|" .env.development.compose
+
+            docker compose \
+              --env-file .env.development.compose \
+              -f docker-compose.yml \
+              pull backend frontend
+
+            docker compose \
+              --env-file .env.development.compose \
+              -f docker-compose.yml \
+              up -d --no-deps backend frontend
+
+  verify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: front/package-lock.json
+
+      - name: Smoke and verify deployed version
+        env:
+          E2E_BASE_URL: ${{ vars.VITE_API_URL }}
+          EXPECTED_VERSION: sha-${{ github.sha }}
+        run: |
+          : "${E2E_BASE_URL:?Set VITE_API_URL in repository variables}"
+
+          # https://домен/api → https://домен
+          export E2E_BASE_URL="${E2E_BASE_URL%/}"
+          export E2E_BASE_URL="${E2E_BASE_URL%/api}"
+
+          # Makefile читает этот файл; URL уже передан через env.
+          : > .env.production.e2e
+
+          # Повторяем проверку, пока контейнеры запускаются.
+          for attempt in {1..12}; do
+            echo "Smoke attempt $attempt/12"
+            ACTUAL_VERSION=""
+
+            if make smoke-deployed &&
+              ACTUAL_VERSION=$(
+                curl -fsS --max-time 10 "$E2E_BASE_URL/api/health" |
+                  node -p 'JSON.parse(require("node:fs").readFileSync(0, "utf8")).version'
+              ) &&
+              [ "$ACTUAL_VERSION" = "$EXPECTED_VERSION" ]; then
+              echo "Verified version: $ACTUAL_VERSION"
+              exit 0
+            fi
+
+            echo "Expected: $EXPECTED_VERSION"
+            echo "Received: ${ACTUAL_VERSION:-unavailable}"
+
+            if [ "$attempt" -lt 12 ]; then
+              sleep 5
+            fi
+          done
+
+          echo "Smoke or version verification failed"
+          exit 1
+
+  notify:
+    needs: [checks, build, deploy, verify]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Send Telegram notification
+        env:
+          CHECKS: ${{ needs.checks.result }}
+          BUILD: ${{ needs.build.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          VERIFY: ${{ needs.verify.result }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "$CHECKS" != "success" ]; then
+            STATUS="❌ Type-check: $CHECKS"
+          elif [ "$BUILD" != "success" ]; then
+            STATUS="❌ Build: $BUILD"
+          elif [ "$DEPLOY" != "success" ]; then
+            STATUS="❌ Deploy: $DEPLOY"
+          elif [ "$VERIFY" != "success" ]; then
+            STATUS="❌ Smoke / SHA: $VERIFY (деплой выполнен)"
+          else
+            STATUS="✅ Деплой успешен"
+          fi
+
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+          TEXT=$(printf '%s\n%s @ %s\nActor: %s\nVersion: sha-%s\n%s' \
+            "$STATUS" \
+            "$GITHUB_REPOSITORY" \
+            "$GITHUB_REF_NAME" \
+            "$GITHUB_ACTOR" \
+            "$GITHUB_SHA" \
+            "$RUN_URL")
+
+          RESPONSE=$(curl -sS \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+            --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+            --data-urlencode "text=$TEXT" \
+            -d "disable_web_page_preview=true")
+
+          printf '%s\n' "$RESPONSE"
+          printf '%s\n' "$RESPONSE" | grep -q '"ok":true' || {
+            echo "Telegram API rejected"
+            exit 1
+          }
