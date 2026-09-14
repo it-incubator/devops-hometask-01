@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1.7
 
-# ---- Stage 1: builder ----
 FROM node:20-alpine AS builder
 
 WORKDIR /app
@@ -13,7 +12,6 @@ COPY src/ src/
 
 RUN npm run build
 
-# ---- Stage 2: runtime ----
 FROM node:20-alpine AS runtime
 
 WORKDIR /app
