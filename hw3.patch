@@ -14,12 +14,12 @@ index 0000000..e3d8a3a
 +E2E_BASE_URL=https://your-domain.example
 +E2E_API_URL=https://your-domain.example/api
 diff --git a/Makefile b/Makefile
-index ca6d141..965a6f2 100644
+index 17f160f..c72ffa2 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -71,5 +71,8 @@ ps: ## Показать статус контейнеров
  e2e-install: ## Один раз: ставит npm-зависимости фронта и качает Chromium для Playwright
- 	cd front && npm install && npx playwright install chromium
+ 	cd front && npm ci && npx playwright install chromium
  
 -e2e: ## Прогнать Playwright-тесты против поднятого стека
 +e2e: ## Прогнать Playwright-тесты против локального стека (через docker compose)
