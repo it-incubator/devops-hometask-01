@@ -69,7 +69,7 @@ ps: ## Показать статус контейнеров
 # ---------- e2e (как в hw1) ----------
 
 e2e-install: ## Один раз: ставит npm-зависимости фронта и качает Chromium для Playwright
-	cd front && npm install && npx playwright install chromium
+	cd front && npm ci && npx playwright install chromium
 
 e2e: ## Прогнать Playwright-тесты против локального стека (через docker compose)
 	set -a && . ./.env.development.e2e && cd front && npm run e2e
