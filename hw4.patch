@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index 965a6f2..dfb1176 100644
+index c72ffa2..52aae56 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -76,3 +76,8 @@ e2e: ## Прогнать Playwright-тесты против локального
