@@ -33,7 +33,7 @@ up: build-back build-front network up-db up-back up-front ## Build images, creat
 down: down-front down-back down-db network-rm ## Stop and remove all containers and the network
 
 e2e-install: ## Install front npm deps and the playwright browser (run once)
-	cd front && npm install && npx playwright install chromium
+	cd front && npm ci && npx playwright install chromium
 
 e2e: ## Run Playwright e2e tests (headless)
 	set -a && . ./.env.development.e2e && cd front && npm run e2e
